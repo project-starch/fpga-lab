@@ -1,0 +1,15 @@
+[Unit]
+Description=fpga-lab hub: board page, bookings, run queue, alerts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/fpga-lab/venv/bin/fpga-lab-hub
+Restart=always
+RestartSec=10
+StandardOutput=append:%h/.local/share/fpga-lab/hub.log
+StandardError=append:%h/.local/share/fpga-lab/hub.log
+
+[Install]
+WantedBy=default.target

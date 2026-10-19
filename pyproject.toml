@@ -1,0 +1,24 @@
+[project]
+name = "fpga-lab"
+version = "0.1.0"
+description = "Leases, bookings, a run queue and alerts for the lab's FPGA boards"
+requires-python = ">=3.9"
+dependencies = [
+  "flask>=2.2",
+  "requests>=2.28",
+  "python-socketio[client]>=5.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+fpga = "fpga_lab.cli:main"
+fpga-lab-hub = "fpga_lab.hub:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["fpga_lab"]
