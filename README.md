@@ -33,7 +33,7 @@ does not renew.
 
 ## Hub
 
-A page for all boards (`http://apollo:8077/`), a booking form, the run queue,
+A page for all boards (`http://<apollo tailscale address>:8077/`, tailnet only), a booking form, the run queue,
 7-day usage and open alerts.
 - **Bookings** are pushed to each console every 5 min and on change. During
   a booking only its holder may take the board, and nobody's lease may run

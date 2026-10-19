@@ -41,8 +41,12 @@ def create_app(cfg=None, consoles=None, start_threads=True):
     app.config['db'] = db
     app.config['monitor'] = mon
 
+    # The hub host itself: loopback, plus the address the hub listens on
+    # (when it is bound to the Tailscale address, the local CLI arrives from it).
+    own = set(LOCAL) | {cfg['hub_listen'].rsplit(':', 1)[0]}
+
     def local_only():
-        if request.remote_addr not in LOCAL:
+        if request.remote_addr not in own:
             abort(403, 'only from the hub host')
 
     # ----------------------------------------------------------------- page
@@ -87,7 +91,7 @@ def create_app(cfg=None, consoles=None, start_threads=True):
             return _reply('No such booking', 404)
         # Trust-based, like the console's typed names: you cancel by naming the
         # holder. The hub host itself may cancel anything.
-        if request.remote_addr not in LOCAL and (f.get('holder') or '').strip() != rows[0]['holder']:
+        if request.remote_addr not in own and (f.get('holder') or '').strip() != rows[0]['holder']:
             return _reply('Type the name the booking was made with to cancel it', 403)
         db.cancel_booking(bid)
         threading.Thread(target=mon.push_bookings, daemon=True).start()

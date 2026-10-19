@@ -11,6 +11,15 @@ mkdir -p "$DATA" "$HOME/.config/fpga-lab" "$HOME/.local/bin" "$HOME/.config/syst
 [[ -x "$VENV/bin/python" ]] || python3 -m venv "$VENV"
 "$VENV/bin/python" -m pip install -q --upgrade "$HERE"
 ln -sf "$VENV/bin/fpga" "$HOME/.local/bin/fpga"
+CFG=$HOME/.config/fpga-lab/config.json
+if [[ ! -f "$CFG" ]]; then
+    ip=$(tailscale ip -4 2>/dev/null | head -1 || true)
+    [[ -n "$ip" ]] || { echo "no Tailscale address; is tailscale up?" >&2; exit 1; }
+    cat >"$CFG" <<JSON
+{"hub_listen": "$ip:8077", "hub_url": "http://$ip:8077"}
+JSON
+    echo "config written: $CFG (hub on $ip:8077, tailnet only)"
+fi
 TOK=$HOME/.config/fpga-lab/hub-token
 if [[ ! -s "$TOK" ]]; then
     (umask 077; python3 -c 'import secrets; print(secrets.token_hex(24))' >"$TOK")

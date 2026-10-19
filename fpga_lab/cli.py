@@ -106,8 +106,14 @@ def cmd_status(cfg, a):
     for b in cfg['boards']:
         try:
             st = _console(cfg, b).lease()
-        except (ConsoleError, SystemExit) as e:
-            print(f'board {b}: unreachable ({getattr(e, "message", e)})')
+        except ConsoleError as e:
+            if e.status == 404:
+                print(f'board {b}: console has no leases yet (old console code)')
+            else:
+                print(f'board {b}: unreachable ({e.message})')
+            continue
+        except SystemExit as e:
+            print(f'board {b}: {e}')
             continue
         L = st.get('lease')
         if L:

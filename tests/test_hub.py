@@ -32,7 +32,8 @@ def lab(tmp_path):
     consoles = {'1': FakeConsole('board 1', clock=clock),
                 '2': FakeConsole('board 2', clock=clock)}
     cfg = {'boards': {'1': {'settle_s': 30}, '2': {'settle_s': 35}},
-           'data_dir': str(tmp_path), 'hub_token_file': None, 'webhook_file': None}
+           'data_dir': str(tmp_path), 'hub_token_file': None, 'webhook_file': None,
+           'hub_listen': '127.0.0.1:8077'}
     db = DB(str(tmp_path / 'lab.sqlite'))
     posted = []
     sink = AlertSink(str(tmp_path / 'alerts.log'), 'http://hook', post=lambda u, b: posted.append(b))
@@ -281,3 +282,15 @@ def test_old_console_without_leases_is_not_unreachable(lab):
     assert 'no leases yet' in lab['db'].job(jid)['reason']
     lab['mon'].push_bookings()              # skipped for that board, no alert
     assert lab['db'].open_alerts() == []
+
+
+def test_hub_own_tailscale_address_counts_as_local(lab):
+    cfg = dict(lab['cfg'], hub_listen='100.64.0.5:8077')
+    app = hub_mod.create_app(cfg, consoles=lab['consoles'], start_threads=False)
+    http = app.test_client()
+    body = {'owner': 'Sam', 'bit_path': lab['bit'], 'bit_sha': lab['bit_sha'],
+            'img_path': lab['img'], 'img_sha': lab['img_sha']}
+    assert http.post('/api/jobs', json=body,
+                     environ_overrides={'REMOTE_ADDR': '100.64.0.5'}).status_code == 200
+    assert http.post('/api/jobs', json=body,
+                     environ_overrides={'REMOTE_ADDR': '100.64.0.6'}).status_code == 403
