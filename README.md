@@ -42,9 +42,13 @@ A page for all boards (`http://<apollo tailscale address>:8077/`, tailnet only),
   lease idle past its release. They are written to
   `~/.local/share/fpga-lab/alerts.log`, and also to a Slack-compatible webhook
   when `webhook_file` is set in the config.
-- **Access:** job submission, cancel and qualify are accepted only from the hub
-  host. The page and bookings are open to whoever can reach the port; grant
-  that port in Tailscale only to the people who should book.
+- **Access:** the page and the booking form are open to whoever can reach the
+  port (grant it in Tailscale to the people who should book). Submitting,
+  cancelling and reading runs, and qualifying bitstreams, need the admin token
+  (`~/.config/fpga-lab/admin-token`, mode 600), which `fpga` sends for the hub's
+  owner. No address is trusted: on a shared server every account could
+  otherwise act as admin. Submitted files travel in the request and are
+  stored by content hash; the hub never opens a path a caller names.
 
 ## Install on apollo
 
@@ -64,4 +68,5 @@ A page for all boards (`http://<apollo tailscale address>:8077/`, tailnet only),
 ```
 FPGA_REMOTE_DIR=../fpga-remote python -m pytest tests/
 python tests/integration_console.py ../fpga-remote <python>   # against the real console code, no hardware
+python tests/integration_submit.py                             # fpga submit through a real hub
 ```

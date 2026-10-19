@@ -7,8 +7,10 @@ stay in files on this host.
 """
 
 import datetime
+import hashlib
 import hmac
 import os
+import re
 import threading
 import time
 
@@ -19,7 +21,7 @@ from .client import Console, ConsoleError, read_url
 from .db import DB
 from .monitor import AlertSink, Monitor
 
-LOCAL = ('127.0.0.1', '::1')
+ADMIN_HEADER = 'X-Lab-Admin'
 
 
 def make_consoles(cfg):
@@ -32,8 +34,11 @@ def make_consoles(cfg):
 def create_app(cfg=None, consoles=None, start_threads=True):
     cfg = cfg or config_mod.load()
     db = DB(os.path.join(cfg['data_dir'], 'lab.sqlite'))
+    files_dir = os.path.join(cfg['data_dir'], 'files')
+    os.makedirs(files_dir, exist_ok=True)
     consoles = consoles if consoles is not None else make_consoles(cfg)
     hub_token = config_mod.read_secret(cfg.get('hub_token_file'))
+    admin_token = config_mod.read_secret(cfg.get('admin_token_file'))
     sink = AlertSink(os.path.join(cfg['data_dir'], 'alerts.log'),
                      config_mod.read_secret(cfg.get('webhook_file')))
     mon = Monitor(db, consoles, cfg, hub_token, sink)
@@ -41,13 +46,17 @@ def create_app(cfg=None, consoles=None, start_threads=True):
     app.config['db'] = db
     app.config['monitor'] = mon
 
-    # The hub host itself: loopback, plus the address the hub listens on
-    # (when it is bound to the Tailscale address, the local CLI arrives from it).
-    own = set(LOCAL) | {cfg['hub_listen'].rsplit(':', 1)[0]}
+    # Running jobs, cancelling them, reading their logs and qualifying
+    # bitstreams need the admin token: a file readable only by the hub's own
+    # user. Trusting the source address instead made every account on the hub
+    # host an admin -- apollo is a shared server.
+    def is_admin():
+        given = request.headers.get(ADMIN_HEADER, '')
+        return bool(admin_token) and hmac.compare_digest(given, admin_token)
 
-    def local_only():
-        if request.remote_addr not in own:
-            abort(403, 'only from the hub host')
+    def admin_only():
+        if not is_admin():
+            abort(403, 'needs the lab admin token (fpga on the hub host, as its owner)')
 
     # ----------------------------------------------------------------- page
 
@@ -90,8 +99,8 @@ def create_app(cfg=None, consoles=None, start_threads=True):
         if not rows:
             return _reply('No such booking', 404)
         # Trust-based, like the console's typed names: you cancel by naming the
-        # holder. The hub host itself may cancel anything.
-        if request.remote_addr not in own and (f.get('holder') or '').strip() != rows[0]['holder']:
+        # holder. The admin may cancel anything.
+        if not is_admin() and (f.get('holder') or '').strip() != rows[0]['holder']:
             return _reply('Type the name the booking was made with to cancel it', 403)
         db.cancel_booking(bid)
         threading.Thread(target=mon.push_bookings, daemon=True).start()
@@ -120,25 +129,41 @@ def create_app(cfg=None, consoles=None, start_threads=True):
 
     @app.route('/api/jobs', methods=['POST'])
     def api_submit():
-        local_only()
-        d = request.get_json(silent=True) or {}
-        need = ('owner', 'bit_path', 'bit_sha', 'img_path', 'img_sha')
-        if any(not d.get(k) for k in need):
-            return jsonify({'error': f'need {need}'}), 400
-        board = str(d.get('board', 'any'))
+        """Queue a run. The bitstream and image come IN the request and are
+        stored by content hash: the hub never opens a path a caller names."""
+        admin_only()
+        f = request.form
+        bit, img = request.files.get('bit'), request.files.get('img')
+        if not f.get('owner') or not bit or not img:
+            return jsonify({'error': 'need owner and the files bit and img'}), 400
+        board = str(f.get('board', 'any'))
         if board != 'any' and board not in consoles:
             return jsonify({'error': 'no such board'}), 400
-        for p in (d['bit_path'], d['img_path']):
-            if not os.path.isfile(p):
-                return jsonify({'error': f'not a file on the hub host: {p}'}), 400
-        jid = db.add_job(d['owner'], d.get('purpose', ''), board, d['bit_path'],
-                         d['bit_sha'], d['img_path'], d['img_sha'],
-                         d.get('until_regex'), int(d.get('timeout_s', 600)))
-        return jsonify({'id': jid})
+        stored = {}
+        for key, up, ext in (('bit', bit, '.bit'), ('img', img, '.bin')):
+            data = up.read()
+            sha = hashlib.sha256(data).hexdigest()
+            stem = re.sub(r'[^A-Za-z0-9._-]', '_', os.path.splitext(up.filename or key)[0])[:60] or key
+            path = os.path.join(files_dir, f'{stem}_{sha[:12]}{ext}')
+            if not os.path.exists(path):
+                with open(path + '.tmp', 'wb') as fh:
+                    fh.write(data)
+                os.replace(path + '.tmp', path)
+            stored[key] = (path, sha)
+        until = f.get('until_regex') or None
+        if until:
+            try:
+                re.compile(until)
+            except re.error as e:
+                return jsonify({'error': f'bad regex: {e}'}), 400
+        jid = db.add_job(f['owner'][:64], f.get('purpose', '')[:120], board,
+                         stored['bit'][0], stored['bit'][1], stored['img'][0], stored['img'][1],
+                         until, max(10, min(int(f.get('timeout_s', 600)), 7200)))
+        return jsonify({'id': jid, 'bit_sha': stored['bit'][1], 'img_sha': stored['img'][1]})
 
     @app.route('/api/jobs/<int:jid>/cancel', methods=['POST'])
     def api_cancel(jid):
-        local_only()
+        admin_only()
         j = db.job(jid)
         if not j:
             return jsonify({'error': 'no such job'}), 404
@@ -148,6 +173,7 @@ def create_app(cfg=None, consoles=None, start_threads=True):
 
     @app.route('/api/jobs/<int:jid>/log')
     def api_log(jid):
+        admin_only()          # UART output of other people's runs
         try:
             with open(mon.runner.log_path(jid)) as fh:
                 return fh.read(), 200, {'Content-Type': 'text/plain; charset=utf-8'}
@@ -156,7 +182,7 @@ def create_app(cfg=None, consoles=None, start_threads=True):
 
     @app.route('/api/qualify', methods=['POST'])
     def api_qualify():
-        local_only()
+        admin_only()
         d = request.get_json(silent=True) or {}
         if str(d.get('board')) not in consoles or len(d.get('bit_sha', '')) != 64:
             return jsonify({'error': 'need board and a 64-hex bit_sha'}), 400
@@ -279,9 +305,9 @@ button { background:var(--accent); color:var(--surface); border-color:var(--acce
 
 <section><h2>Run queue</h2>
 {% if jobs %}<div class="wrap"><table><tr><th>#</th><th>Owner</th><th>Board</th><th>State</th><th>Note</th></tr>
-{% for j in jobs %}<tr><td><a href="api/jobs/{{ j.id }}/log">{{ j.id }}</a></td><td>{{ j.owner }}</td>
+{% for j in jobs %}<tr><td>{{ j.id }}</td><td>{{ j.owner }}</td>
 <td>{{ j.board or j.board_req }}</td><td>{{ j.state }}</td><td class="muted">{{ j.reason or '' }}</td></tr>{% endfor %}
-</table></div>{% else %}<p class="muted">No runs yet. Submit with <code>fpga submit</code> on the hub host.</p>{% endif %}
+</table></div>{% else %}<p class="muted">No runs yet. Runs are submitted with <code>fpga submit</code> on the hub host.</p>{% endif %}
 </section>
 
 <section><h2>Use in the last 7 days</h2>
@@ -297,8 +323,8 @@ def main():
     cfg = config_mod.load()
     host, port = cfg['hub_listen'].rsplit(':', 1)
     app = create_app(cfg)
-    from werkzeug.serving import run_simple
-    run_simple(host, int(port), app, threaded=True)
+    from waitress import serve
+    serve(app, host=host, port=int(port), threads=8)
 
 
 if __name__ == '__main__':

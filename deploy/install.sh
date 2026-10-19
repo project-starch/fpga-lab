@@ -26,6 +26,12 @@ if [[ ! -s "$TOK" ]]; then
     echo "hub token created: $TOK (mode 600). Each console needs the same value as"
     echo "LEASE_HUB_TOKEN in its ~/.config/fpga-remote.env before bookings take effect."
 fi
+ADM=$HOME/.config/fpga-lab/admin-token
+if [[ ! -s "$ADM" ]]; then
+    (umask 077; python3 -c 'import secrets; print(secrets.token_hex(24))' >"$ADM")
+    echo "admin token created: $ADM (mode 600; fpga submit/cancel/log/qualify use it)"
+fi
+chmod 700 "$HOME/.config/fpga-lab" "$DATA"
 install -m 644 "$HERE/deploy/fpga-lab-hub.service" "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
 for b in 1 2; do

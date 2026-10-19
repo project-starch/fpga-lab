@@ -233,22 +233,53 @@ def test_page_and_booking_form(lab, tmp_path):
     assert 'overlaps' in unquote(r.headers['Location'])
     bid = http.get('/api/bookings').get_json()[0]['id']
     r = http.post(f'/bookings/{bid}/cancel', data={'holder': 'Lee'},
-                  environ_overrides={'REMOTE_ADDR': '100.1.2.3'})
+                  environ_overrides={'REMOTE_ADDR': '127.0.0.1'})   # no address is trusted
     assert 'Type the name' in unquote(r.headers['Location'])
     r = http.post(f'/bookings/{bid}/cancel', data={'holder': 'Kim'},
                   environ_overrides={'REMOTE_ADDR': '100.1.2.3'})
     assert 'cancelled' in unquote(r.headers['Location'])
 
 
-def test_job_submit_only_from_hub_host(lab):
-    app = hub_mod.create_app(lab['cfg'], consoles=lab['consoles'], start_threads=False)
+def _admin_app(lab, token='adm1n'):
+    p = lab['tmp'] / 'admin-token'
+    p.write_text(token)
+    cfg = dict(lab['cfg'], admin_token_file=str(p))
+    return hub_mod.create_app(cfg, consoles=lab['consoles'], start_threads=False)
+
+
+def _files(lab):
+    return {'bit': (open(lab['bit'], 'rb'), 'design.bit'), 'img': (open(lab['img'], 'rb'), 'smoke.bin')}
+
+
+def test_job_submit_needs_admin_token_not_an_address(lab):
+    app = _admin_app(lab)
     http = app.test_client()
-    body = {'owner': 'Sam', 'bit_path': lab['bit'], 'bit_sha': lab['bit_sha'],
-            'img_path': lab['img'], 'img_sha': lab['img_sha']}
-    r = http.post('/api/jobs', json=body, environ_overrides={'REMOTE_ADDR': '100.1.2.3'})
+    form = {'owner': 'Sam', 'board': '1', **_files(lab)}
+    # From the hub host itself, without the token: refused (apollo is shared).
+    for addr in ('127.0.0.1', '100.112.174.77'):
+        r = http.post('/api/jobs', data={'owner': 'Sam', 'board': '1', **_files(lab)},
+                      environ_overrides={'REMOTE_ADDR': addr})
+        assert r.status_code == 403, addr
+    r = http.post('/api/jobs', data={'owner': 'Sam', **_files(lab)}, headers={'X-Lab-Admin': 'wrong'})
     assert r.status_code == 403
-    r = http.post('/api/jobs', json=body)
-    assert r.status_code == 200 and r.get_json()['id'] == 1
+    r = http.post('/api/jobs', data=form, headers={'X-Lab-Admin': 'adm1n'},
+                  content_type='multipart/form-data')
+    assert r.status_code == 200, r.get_json()
+    d = r.get_json()
+    assert d['bit_sha'] == lab['bit_sha'] and d['img_sha'] == lab['img_sha']
+    job = lab['db'].job(d['id'])
+    assert job['bit_path'].startswith(str(lab['tmp'] / 'files'))     # stored copy, not a caller path
+    assert http.get(f"/api/jobs/{d['id']}/log").status_code == 403
+    assert http.get(f"/api/jobs/{d['id']}/log", headers={'X-Lab-Admin': 'adm1n'}).status_code in (200, 404)
+    assert http.post(f"/api/jobs/{d['id']}/cancel").status_code == 403
+
+
+def test_no_admin_token_file_means_no_admin(lab):
+    app = hub_mod.create_app(dict(lab['cfg'], admin_token_file=None), consoles=lab['consoles'],
+                             start_threads=False)
+    r = app.test_client().post('/api/jobs', data={'owner': 'Sam', **_files(lab)},
+                               headers={'X-Lab-Admin': ''})
+    assert r.status_code == 403
 
 
 def test_page_never_shows_console_url(lab):
@@ -291,13 +322,3 @@ def test_old_console_without_leases_is_not_unreachable(lab):
     assert [a['key'] for a in lab['db'].open_alerts()] == ['push:1']
 
 
-def test_hub_own_tailscale_address_counts_as_local(lab):
-    cfg = dict(lab['cfg'], hub_listen='100.64.0.5:8077')
-    app = hub_mod.create_app(cfg, consoles=lab['consoles'], start_threads=False)
-    http = app.test_client()
-    body = {'owner': 'Sam', 'bit_path': lab['bit'], 'bit_sha': lab['bit_sha'],
-            'img_path': lab['img'], 'img_sha': lab['img_sha']}
-    assert http.post('/api/jobs', json=body,
-                     environ_overrides={'REMOTE_ADDR': '100.64.0.5'}).status_code == 200
-    assert http.post('/api/jobs', json=body,
-                     environ_overrides={'REMOTE_ADDR': '100.64.0.6'}).status_code == 403

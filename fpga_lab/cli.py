@@ -86,8 +86,13 @@ def _token(board):
 
 
 def _hub(cfg, method, path, **kw):
+    headers = kw.pop('headers', {})
+    tok = config_mod.read_secret(cfg.get('admin_token_file'))
+    if tok:
+        headers['X-Lab-Admin'] = tok
     try:
-        r = requests.request(method, cfg['hub_url'].rstrip('/') + path, timeout=30, **kw)
+        r = requests.request(method, cfg['hub_url'].rstrip('/') + path, timeout=300,
+                             headers=headers, **kw)
     except requests.RequestException as e:
         raise SystemExit(f'hub not reachable at {cfg["hub_url"]}: {type(e).__name__}')
     if r.headers.get('Content-Type', '').startswith('application/json'):
@@ -96,6 +101,8 @@ def _hub(cfg, method, path, **kw):
         body = r.text
     if r.status_code >= 400:
         msg = body.get('error') if isinstance(body, dict) else body
+        if r.status_code == 403 and not tok:
+            msg = 'this needs the lab admin token; run fpga as the hub owner on the hub host'
         raise SystemExit(f'hub: {msg}')
     return body
 
@@ -209,13 +216,13 @@ def cmd_submit(cfg, a):
     for p in (a.bit, a.img):
         if not os.path.isfile(p):
             raise SystemExit(f'not a file: {p}')
-    body = {'owner': a.name or getpass.getuser(), 'purpose': a.why or '',
-            'board': a.board, 'bit_path': os.path.abspath(a.bit), 'bit_sha': _sha(a.bit),
-            'img_path': os.path.abspath(a.img), 'img_sha': _sha(a.img),
-            'until_regex': a.until, 'timeout_s': a.timeout}
     if a.until:
         re.compile(a.until)
-    r = _hub(cfg, 'POST', '/api/jobs', json=body)
+    form = {'owner': a.name or getpass.getuser(), 'purpose': a.why or '',
+            'board': a.board, 'until_regex': a.until or '', 'timeout_s': str(a.timeout)}
+    with open(a.bit, 'rb') as fb, open(a.img, 'rb') as fi:
+        r = _hub(cfg, 'POST', '/api/jobs', data=form,
+                 files={'bit': (os.path.basename(a.bit), fb), 'img': (os.path.basename(a.img), fi)})
     print(f'job {r["id"]} queued')
     return 0
 

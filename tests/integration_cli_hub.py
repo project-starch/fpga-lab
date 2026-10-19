@@ -18,8 +18,10 @@ srv = subprocess.Popen([py, os.path.join(repo, 'tests', 'dev_server.py'), str(po
                        env=env, stdout=open(tmp + '/srv.log', 'w'), stderr=subprocess.STDOUT)
 open(tmp + '/url', 'w').write(f'http://127.0.0.1:{port}/')
 open(tmp + '/hubtok', 'w').write('hubsecret')
+open(tmp + '/admintok', 'w').write('adm1n')
 cfg = {'boards': {'2': {'url_file': tmp + '/url', 'settle_s': 35}}, 'data_dir': tmp + '/data',
-       'hub_url': 'http://127.0.0.1:1', 'hub_token_file': tmp + '/hubtok'}
+       'hub_url': 'http://127.0.0.1:1', 'hub_token_file': tmp + '/hubtok',
+       'admin_token_file': tmp + '/admintok'}
 json.dump(cfg, open(tmp + '/cfg.json', 'w'))
 cenv = dict(os.environ, FPGA_LAB_CONFIG=tmp + '/cfg.json', HOME=tmp)
 res = []

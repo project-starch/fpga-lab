@@ -9,7 +9,8 @@
       },
       "hub_listen": "100.112.174.77:8077",
       "hub_url": "http://100.112.174.77:8077",
-      "hub_token_file": "~/.config/fpga-lab/hub-token",
+      "hub_token_file": "~/.config/fpga-lab/hub-token",     (shared with the consoles)
+      "admin_token_file": "~/.config/fpga-lab/admin-token", (submit/cancel/log/qualify)
       "data_dir": "~/.local/share/fpga-lab",
       "webhook_file": null
     }
@@ -34,6 +35,7 @@ DEFAULTS = {
     'hub_listen': '0.0.0.0:8077',
     'hub_url': 'http://127.0.0.1:8077',
     'hub_token_file': '~/.config/fpga-lab/hub-token',
+    'admin_token_file': '~/.config/fpga-lab/admin-token',
     'data_dir': '~/.local/share/fpga-lab',
     'webhook_file': None,
 }
