@@ -6,10 +6,20 @@ each board's console (fpga-remote) only through the console's lease API. The
 consoles stay the authority: if the hub is down, the boards still work and
 leases are still enforced.
 
+## For agents
+
+Everything is an HTTP API; `GET /api` (or `/llms.txt`) on the hub returns a
+plain-text guide an agent can read directly. Each person or agent gets a
+token from the lab admin (`fpga user add NAME`, shown once, stored hashed);
+bookings and runs are then attributed to that name, and only their owner (or
+the admin) can cancel them or read a run's log.
+
 ## Commands
 
 ```
 fpga status                                   every board: holder, time left, queue, bookings
+fpga timeline | fpga free 2 --for 2h          who has / will have each board; earliest free slot
+fpga book 2 --at "2026-10-21 10:00" --for 2h --why "..." | fpga bookings | fpga unbook 7
 fpga take 2 --for 60m --why "boot test"       lease board 2 (60 min default, 2 h cap)
 fpga extend 2 | fpga keep 2 | fpga release 2
 fpga queue 2                                  wait for a held board; you get 5 min to claim it
@@ -50,6 +60,16 @@ A page for all boards (`http://<apollo tailscale address>:8077/`, tailnet only),
   otherwise act as admin. Submitted files travel in the request and are
   stored by content hash; the hub never opens a path a caller names.
 
+## Use from another machine (a colleague's laptop or agent)
+
+```
+pip install git+https://github.com/project-starch/fpga-lab
+mkdir -p ~/.config/fpga-lab
+echo '{"hub_url": "http://100.112.174.77:8077", "boards": {}}' > ~/.config/fpga-lab/config.json
+(umask 077; echo '<token from the admin>' > ~/.config/fpga-lab/token)
+fpga timeline
+```
+
 ## Install on apollo
 
 ```
@@ -69,4 +89,5 @@ A page for all boards (`http://<apollo tailscale address>:8077/`, tailnet only),
 FPGA_REMOTE_DIR=../fpga-remote python -m pytest tests/
 python tests/integration_console.py ../fpga-remote <python>   # against the real console code, no hardware
 python tests/integration_submit.py                             # fpga submit through a real hub
+python tests/integration_agent_api.py                          # a remote user's token, bookings, timeline
 ```

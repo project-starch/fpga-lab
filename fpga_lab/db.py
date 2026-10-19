@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS usage (
   board TEXT NOT NULL, minute INTEGER NOT NULL, holder TEXT, kind TEXT,
   PRIMARY KEY (board, minute)
 );
+CREATE TABLE IF NOT EXISTS users (
+  name TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, created REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, board TEXT,
   message TEXT NOT NULL, opened REAL NOT NULL, closed REAL
@@ -130,6 +133,21 @@ class DB:
                          WHERE minute >= ? AND holder IS NOT NULL
                          GROUP BY board, holder, kind ORDER BY board, minutes DESC""",
                       int(since // 60))
+
+    # -------------------------------------------------------------- users
+
+    def add_user(self, name, token_sha):
+        self.x('INSERT OR REPLACE INTO users VALUES (?,?,?)', name, token_sha, time.time())
+
+    def user_by_token_sha(self, token_sha):
+        r = self.q('SELECT name FROM users WHERE token_sha=?', token_sha)
+        return r[0]['name'] if r else None
+
+    def users(self):
+        return self.q('SELECT name, created FROM users ORDER BY name')
+
+    def remove_user(self, name):
+        self.x('DELETE FROM users WHERE name=?', name)
 
     # ------------------------------------------------------------- alerts
 

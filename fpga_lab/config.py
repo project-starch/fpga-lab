@@ -36,6 +36,7 @@ DEFAULTS = {
     'hub_url': 'http://127.0.0.1:8077',
     'hub_token_file': '~/.config/fpga-lab/hub-token',
     'admin_token_file': '~/.config/fpga-lab/admin-token',
+    'user_token_file': '~/.config/fpga-lab/token',
     'data_dir': '~/.local/share/fpga-lab',
     'webhook_file': None,
 }

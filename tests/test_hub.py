@@ -259,9 +259,9 @@ def test_job_submit_needs_admin_token_not_an_address(lab):
     for addr in ('127.0.0.1', '100.112.174.77'):
         r = http.post('/api/jobs', data={'owner': 'Sam', 'board': '1', **_files(lab)},
                       environ_overrides={'REMOTE_ADDR': addr})
-        assert r.status_code == 403, addr
+        assert r.status_code == 401, addr
     r = http.post('/api/jobs', data={'owner': 'Sam', **_files(lab)}, headers={'X-Lab-Admin': 'wrong'})
-    assert r.status_code == 403
+    assert r.status_code == 401
     r = http.post('/api/jobs', data=form, headers={'X-Lab-Admin': 'adm1n'},
                   content_type='multipart/form-data')
     assert r.status_code == 200, r.get_json()
@@ -269,9 +269,9 @@ def test_job_submit_needs_admin_token_not_an_address(lab):
     assert d['bit_sha'] == lab['bit_sha'] and d['img_sha'] == lab['img_sha']
     job = lab['db'].job(d['id'])
     assert job['bit_path'].startswith(str(lab['tmp'] / 'files'))     # stored copy, not a caller path
-    assert http.get(f"/api/jobs/{d['id']}/log").status_code == 403
+    assert http.get(f"/api/jobs/{d['id']}/log").status_code == 401
     assert http.get(f"/api/jobs/{d['id']}/log", headers={'X-Lab-Admin': 'adm1n'}).status_code in (200, 404)
-    assert http.post(f"/api/jobs/{d['id']}/cancel").status_code == 403
+    assert http.post(f"/api/jobs/{d['id']}/cancel").status_code == 401
 
 
 def test_no_admin_token_file_means_no_admin(lab):
@@ -279,7 +279,7 @@ def test_no_admin_token_file_means_no_admin(lab):
                              start_threads=False)
     r = app.test_client().post('/api/jobs', data={'owner': 'Sam', **_files(lab)},
                                headers={'X-Lab-Admin': ''})
-    assert r.status_code == 403
+    assert r.status_code == 401
 
 
 def test_page_never_shows_console_url(lab):
@@ -362,3 +362,49 @@ def test_page_shows_timeline_and_escapes_names(lab):
     assert '<svg class="tl"' in page and 'Timeline' in page
     assert '<script>x</script>' not in page and '&lt;script&gt;' in page
     assert app.test_client().get('/api/timeline').status_code == 200
+
+
+
+# ------------------------------------------------------ users and agent API
+
+def test_user_tokens_bookings_and_own_jobs(lab):
+    app = _admin_app(lab)
+    http = app.test_client()
+    A = {'X-Lab-Admin': 'adm1n'}
+    assert http.post('/api/users', json={'name': 'diego'}).status_code == 403
+    tok = http.post('/api/users', json={'name': 'diego'}, headers=A).get_json()['token']
+    tok2 = http.post('/api/users', json={'name': 'kim'}, headers=A).get_json()['token']
+    D, K = {'X-Lab-Token': tok}, {'X-Lab-Token': tok2}
+    assert http.get('/api/whoami', headers=D).get_json() == {'role': 'user', 'name': 'diego'}
+    assert http.get('/api/whoami', headers={'X-Lab-Token': 'flab_wrong'}).get_json()['role'] is None
+    import time as _t
+    start = _t.time() + 3600
+    # booking: holder is the token's user, a typed holder is ignored
+    r = http.post('/api/bookings', headers=D,
+                  json={'board': '2', 'start': start, 'minutes': 60, 'holder': 'someone-else'})
+    assert r.status_code == 201 and r.get_json()['holder'] == 'diego'
+    bid = r.get_json()['id']
+    r = http.post('/api/bookings', headers=K, json={'board': '2', 'start': start + 1800, 'minutes': 60})
+    assert r.status_code == 409
+    iso = _t.strftime('%Y-%m-%dT%H:%M', _t.localtime(start + 7200))
+    assert http.post('/api/bookings', headers=K, json={'board': '2', 'start': iso, 'minutes': 30}).status_code == 201
+    assert http.post('/api/bookings', json={'board': '2', 'start': start, 'minutes': 30}).status_code == 401
+    assert http.delete(f'/api/bookings/{bid}', headers=K).status_code == 403
+    free = http.get('/api/free?board=2&minutes=60').get_json()['2']['start']
+    assert free < start or free >= start + 3600
+    assert http.delete(f'/api/bookings/{bid}', headers=D).status_code == 200
+    # jobs: owner is the user; others cannot cancel or read
+    r = http.post('/api/jobs', headers=D, data={'owner': 'faked', 'board': '1', **_files(lab)},
+                  content_type='multipart/form-data')
+    assert r.status_code == 200
+    jid = r.get_json()['id']
+    assert lab['db'].job(jid)['owner'] == 'diego'
+    assert http.get(f'/api/jobs/{jid}/log', headers=K).status_code == 403
+    assert http.post(f'/api/jobs/{jid}/cancel', headers=K).status_code == 403
+    assert http.post(f'/api/jobs/{jid}/cancel', headers=D).get_json()['state'] == 'cancelled'
+    # removed user loses access
+    http.delete('/api/users/diego', headers=A)
+    assert http.get('/api/whoami', headers=D).get_json()['role'] is None
+    # tokens stored hashed
+    assert tok not in str(lab['db'].q('SELECT * FROM users'))
+    assert 'X-Lab-Token' in http.get('/llms.txt').data.decode()

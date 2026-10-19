@@ -4,14 +4,20 @@
   fpga take BOARD [--for 60m] [--why TEXT] [--name NAME]
   fpga extend BOARD | fpga keep BOARD | fpga release BOARD
   fpga queue BOARD [--why TEXT]       wait for a held board
+  fpga timeline [--ahead 24h]         who has had / has / will have each board
+  fpga free BOARD [--for 60m]         earliest free slot
+  fpga book BOARD --at "2026-10-21 10:00" [--for 2h] [--why TEXT]
+  fpga bookings | fpga unbook ID
   fpga submit --bit X.bit --img Y.bin [--board any|1|2] [--until REGEX] [--timeout 10m]
   fpga jobs | fpga cancel ID | fpga log ID
-  fpga qualify BOARD BIT.bit          record that a bitstream passed the cross-board canary
+  fpga qualify BOARD BIT.bit          (admin) bitstream passed the cross-board canary
+  fpga user add NAME | fpga user list | fpga user remove NAME      (admin)
   fpga report [--days 7]
 
-take/extend/keep/release/queue talk to the board's console directly; the
-lease token is kept in ~/.local/state/fpga-lab/leases.json (mode 600).
-submit/jobs/cancel/log/qualify/report talk to the hub on this host.
+take/extend/keep/release/queue talk to a board's console directly (needs its
+URL file); the lease token is kept in ~/.local/state/fpga-lab/leases.json
+(mode 600). Everything else talks to the hub: your token goes in
+~/.config/fpga-lab/token (mode 600), or the admin token on the hub host.
 """
 
 import argparse
@@ -90,6 +96,10 @@ def _hub(cfg, method, path, **kw):
     tok = config_mod.read_secret(cfg.get('admin_token_file'))
     if tok:
         headers['X-Lab-Admin'] = tok
+    utok = config_mod.read_secret(cfg.get('user_token_file'))
+    if utok:
+        headers['X-Lab-Token'] = utok
+    tok = tok or utok
     try:
         r = requests.request(method, cfg['hub_url'].rstrip('/') + path, timeout=300,
                              headers=headers, **kw)
@@ -101,8 +111,8 @@ def _hub(cfg, method, path, **kw):
         body = r.text
     if r.status_code >= 400:
         msg = body.get('error') if isinstance(body, dict) else body
-        if r.status_code == 403 and not tok:
-            msg = 'this needs the lab admin token; run fpga as the hub owner on the hub host'
+        if r.status_code == 401:
+            msg = 'needs a lab token in ~/.config/fpga-lab/token (ask the lab admin: fpga user add NAME)'
         raise SystemExit(f'hub: {msg}')
     return body
 
@@ -253,6 +263,75 @@ def cmd_qualify(cfg, a):
     return 0
 
 
+def _when(s):
+    import datetime
+    s = s.strip().replace(' ', 'T', 1)
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.astimezone()          # your local time
+    return dt.isoformat()
+
+
+def cmd_book(cfg, a):
+    b = _hub(cfg, 'POST', '/api/bookings', json={'board': a.board, 'start': _when(a.at),
+                                                 'minutes': int(a.for_), 'purpose': a.why or ''})
+    print(f"booking {b['id']}: board {b['board']} {_hhmm(b['start'])}-{_hhmm(b['end'])} "
+          f"{time.strftime('%a %d %b', time.localtime(b['start']))} for {b['holder']}")
+    return 0
+
+
+def cmd_bookings(cfg, a):
+    rows = _hub(cfg, 'GET', '/api/bookings')
+    if not rows:
+        print('no bookings')
+    for b in rows:
+        print(f"{b['id']:>5}  board {b['board']}  {time.strftime('%a %d %b %H:%M', time.localtime(b['start']))}"
+              f"-{_hhmm(b['end'])}  {b['holder']:<14} {b.get('purpose') or ''}")
+    return 0
+
+
+def cmd_unbook(cfg, a):
+    _hub(cfg, 'DELETE', f'/api/bookings/{a.id}')
+    print(f'booking {a.id} cancelled')
+    return 0
+
+
+def cmd_free(cfg, a):
+    r = _hub(cfg, 'GET', f'/api/free?board={a.board}&minutes={int(a.for_)}')
+    for b, v in r.items():
+        print(f"board {b}: free for {int(a.for_)} min from "
+              f"{time.strftime('%a %d %b %H:%M', time.localtime(v['start']))}")
+    return 0
+
+
+def cmd_timeline(cfg, a):
+    tl = _hub(cfg, 'GET', f'/api/timeline?back=0&ahead={a.ahead / 60:.2f}')
+    now = tl['now']
+    for row in tl['rows']:
+        print(f"board {row['board']}:")
+        segs = sorted((s for s in row['segs'] if s['end'] > now), key=lambda s: s['start'])
+        if not segs:
+            print('  free')
+        for s in segs:
+            kind = {'booking': 'booked', 'job-est': 'run (est.)'}.get(s['type'], 'lease')
+            print(f"  {time.strftime('%a %H:%M', time.localtime(max(s['start'], now)))}"
+                  f"-{_hhmm(s['end'])}  {kind:<10} {s['label']}")
+    return 0
+
+
+def cmd_user(cfg, a):
+    if a.action == 'add':
+        r = _hub(cfg, 'POST', '/api/users', json={'name': a.name})
+        print(f"user {r['name']} added. Token (shown once; give it to them privately):\n{r['token']}")
+    elif a.action == 'list':
+        for u in _hub(cfg, 'GET', '/api/users'):
+            print(u['name'])
+    elif a.action == 'remove':
+        _hub(cfg, 'DELETE', f'/api/users/{a.name}')
+        print(f'user {a.name} removed')
+    return 0
+
+
 def cmd_report(cfg, a):
     rows = _hub(cfg, 'GET', f'/api/report?days={a.days}')
     if not rows:
@@ -293,6 +372,21 @@ def main(argv=None):
     qq = sub.add_parser('qualify')
     qq.add_argument('board')
     qq.add_argument('bit')
+    tl = sub.add_parser('timeline')
+    tl.add_argument('--ahead', type=_minutes, default=24 * 60, metavar='24h')
+    fr = sub.add_parser('free')
+    fr.add_argument('board')
+    fr.add_argument('--for', dest='for_', type=_minutes, default=60, metavar='60m')
+    bk = sub.add_parser('book')
+    bk.add_argument('board')
+    bk.add_argument('--at', required=True, help='"2026-10-21 10:00" (your local time) or ISO 8601')
+    bk.add_argument('--for', dest='for_', type=_minutes, default=60, metavar='60m')
+    bk.add_argument('--why', default='')
+    sub.add_parser('bookings')
+    sub.add_parser('unbook').add_argument('id', type=int)
+    us = sub.add_parser('user')
+    us.add_argument('action', choices=('add', 'list', 'remove'))
+    us.add_argument('name', nargs='?')
     r = sub.add_parser('report')
     r.add_argument('--days', type=float, default=7)
     a = p.parse_args(argv)

@@ -23,6 +23,7 @@ from .monitor import AlertSink, Monitor
 from . import timeline as timeline_mod
 
 ADMIN_HEADER = 'X-Lab-Admin'
+USER_HEADER = 'X-Lab-Token'
 
 
 def make_consoles(cfg):
@@ -55,9 +56,30 @@ def create_app(cfg=None, consoles=None, start_threads=True):
         given = request.headers.get(ADMIN_HEADER, '')
         return bool(admin_token) and hmac.compare_digest(given, admin_token)
 
+    def user():
+        """The caller's lab user name from X-Lab-Token, or None. Tokens are
+        stored only as sha256; the admin issues them (`fpga user add`)."""
+        tok = request.headers.get(USER_HEADER, '')
+        if not tok:
+            return None
+        return db.user_by_token_sha(hashlib.sha256(tok.encode()).hexdigest())
+
+    def caller():
+        """('admin', None) | ('user', name) | (None, None)"""
+        if is_admin():
+            return 'admin', None
+        u = user()
+        return ('user', u) if u else (None, None)
+
     def admin_only():
         if not is_admin():
             abort(403, 'needs the lab admin token (fpga on the hub host, as its owner)')
+
+    def user_or_admin():
+        role, name = caller()
+        if not role:
+            abort(401, 'needs a lab token in X-Lab-Token (ask the lab admin: fpga user add NAME)')
+        return role, name
 
     # ----------------------------------------------------------------- page
 
@@ -148,11 +170,12 @@ def create_app(cfg=None, consoles=None, start_threads=True):
     def api_submit():
         """Queue a run. The bitstream and image come IN the request and are
         stored by content hash: the hub never opens a path a caller names."""
-        admin_only()
+        role, name = user_or_admin()
         f = request.form
         bit, img = request.files.get('bit'), request.files.get('img')
-        if not f.get('owner') or not bit or not img:
-            return jsonify({'error': 'need owner and the files bit and img'}), 400
+        owner = name if role == 'user' else (f.get('owner') or '')
+        if not owner or not bit or not img:
+            return jsonify({'error': 'need the files bit and img (and owner, for the admin)'}), 400
         board = str(f.get('board', 'any'))
         if board != 'any' and board not in consoles:
             return jsonify({'error': 'no such board'}), 400
@@ -173,29 +196,136 @@ def create_app(cfg=None, consoles=None, start_threads=True):
                 re.compile(until)
             except re.error as e:
                 return jsonify({'error': f'bad regex: {e}'}), 400
-        jid = db.add_job(f['owner'][:64], f.get('purpose', '')[:120], board,
+        jid = db.add_job(owner[:64], f.get('purpose', '')[:120], board,
                          stored['bit'][0], stored['bit'][1], stored['img'][0], stored['img'][1],
                          until, max(10, min(int(f.get('timeout_s', 600)), 7200)))
         return jsonify({'id': jid, 'bit_sha': stored['bit'][1], 'img_sha': stored['img'][1]})
 
     @app.route('/api/jobs/<int:jid>/cancel', methods=['POST'])
     def api_cancel(jid):
-        admin_only()
+        role, name = user_or_admin()
         j = db.job(jid)
         if not j:
             return jsonify({'error': 'no such job'}), 404
+        if role == 'user' and j['owner'] != name:
+            return jsonify({'error': 'not your job'}), 403
         if j['state'] in ('queued', 'running'):
             db.set_job(jid, state='cancelled')
         return jsonify(db.job(jid))
 
     @app.route('/api/jobs/<int:jid>/log')
     def api_log(jid):
-        admin_only()          # UART output of other people's runs
+        role, name = user_or_admin()      # UART output: your own runs only
+        j = db.job(jid)
+        if not j:
+            return jsonify({'error': 'no such job'}), 404
+        if role == 'user' and j['owner'] != name:
+            return jsonify({'error': 'not your job'}), 403
         try:
             with open(mon.runner.log_path(jid)) as fh:
                 return fh.read(), 200, {'Content-Type': 'text/plain; charset=utf-8'}
         except FileNotFoundError:
             return 'no log yet\n', 404, {'Content-Type': 'text/plain; charset=utf-8'}
+
+    # -------------------------------------------------------- bookings API
+
+    @app.route('/api/bookings', methods=['POST'])
+    def api_book():
+        """Book a board. JSON: {board, start, minutes, purpose}. start is
+        epoch seconds or ISO 8601 (with offset; without one it is hub-local).
+        The holder is the caller's lab user; the admin may pass holder."""
+        role, name = user_or_admin()
+        d = request.get_json(silent=True) or {}
+        try:
+            board = str(d['board'])
+            if board not in consoles:
+                raise ValueError('no such board')
+            start = _parse_when(d['start'])
+            minutes = int(d.get('minutes', 60))
+            if not 15 <= minutes <= 480:
+                raise ValueError('a booking is 15 min to 8 h')
+            if start + minutes * 60 < time.time():
+                raise ValueError('that time has passed')
+            holder = name if role == 'user' else (d.get('holder') or '').strip()[:64]
+            if not holder:
+                raise ValueError('holder is required for the admin')
+            bid = db.add_booking(board, holder, (d.get('purpose') or '').strip()[:120],
+                                 start, start + minutes * 60, request.remote_addr)
+        except KeyError as e:
+            return jsonify({'error': f'missing {e}'}), 400
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 409 if 'overlaps' in str(e) else 400
+        threading.Thread(target=mon.push_bookings, daemon=True).start()
+        b = [x for x in db.bookings(since=0) if x['id'] == bid][0]
+        b.pop('ip', None)
+        return jsonify(b), 201
+
+    @app.route('/api/bookings/<int:bid>', methods=['DELETE'])
+    def api_unbook(bid):
+        role, name = user_or_admin()
+        rows = [b for b in db.bookings(since=0) if b['id'] == bid]
+        if not rows:
+            return jsonify({'error': 'no such booking'}), 404
+        if role == 'user' and rows[0]['holder'] != name:
+            return jsonify({'error': 'not your booking'}), 403
+        db.cancel_booking(bid)
+        threading.Thread(target=mon.push_bookings, daemon=True).start()
+        return jsonify({'cancelled': bid})
+
+    @app.route('/api/free')
+    def api_free():
+        """When is a board free for N minutes? ?board=2&minutes=60[&after=ISO]"""
+        board = request.args.get('board')
+        minutes = int(request.args.get('minutes', 60))
+        after = _parse_when(request.args['after']) if request.args.get('after') else time.time()
+        out = {}
+        tl = timeline_mod.build(db, mon.snapshot(), cfg['boards'], time.time(), 0, 24 * 14)
+        for row in tl['rows']:
+            if board and row['board'] != board:
+                continue
+            busy = sorted((s['start'], s['end']) for s in row['segs'] if s['end'] > after)
+            t = after
+            for bs, be in busy:
+                if t + minutes * 60 <= bs:
+                    break
+                t = max(t, be)
+            out[row['board']] = {'start': t, 'start_local': _iso(t)}
+        return jsonify(out)
+
+    # ----------------------------------------------------------- users API
+
+    @app.route('/api/users', methods=['POST'])
+    def api_user_add():
+        admin_only()
+        name = ((request.get_json(silent=True) or {}).get('name') or '').strip()[:64]
+        if not re.fullmatch(r'[A-Za-z0-9._@-]{2,64}', name or ''):
+            return jsonify({'error': 'name: 2-64 of letters, digits, . _ @ -'}), 400
+        import secrets as _secrets
+        tok = 'flab_' + _secrets.token_urlsafe(24)
+        db.add_user(name, hashlib.sha256(tok.encode()).hexdigest())
+        return jsonify({'name': name, 'token': tok,
+                        'note': 'shown once; the hub keeps only its hash'}), 201
+
+    @app.route('/api/users', methods=['GET'])
+    def api_users():
+        admin_only()
+        return jsonify(db.users())
+
+    @app.route('/api/users/<name>', methods=['DELETE'])
+    def api_user_remove(name):
+        admin_only()
+        db.remove_user(name)
+        return jsonify({'removed': name})
+
+    @app.route('/api/whoami')
+    def api_whoami():
+        role, name = caller()
+        return jsonify({'role': role, 'name': name})
+
+    @app.route('/api')
+    @app.route('/llms.txt')
+    def api_guide():
+        return AGENT_GUIDE, 200, {'Content-Type': 'text/plain; charset=utf-8'}
 
     @app.route('/api/qualify', methods=['POST'])
     def api_qualify():
@@ -233,6 +363,23 @@ def create_app(cfg=None, consoles=None, start_threads=True):
     return app
 
 
+def _parse_when(v):
+    """Epoch seconds, or ISO 8601; a naive ISO time is hub-local."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    v = str(v).strip()
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    dt = datetime.datetime.fromisoformat(v.replace('Z', '+00:00'))
+    return dt.timestamp()
+
+
+def _iso(t):
+    return datetime.datetime.fromtimestamp(t).astimezone().isoformat(timespec='minutes')
+
+
 def _parse_start(date_s, time_s):
     dt = datetime.datetime.strptime(f'{date_s} {time_s}', '%Y-%m-%d %H:%M')
     return dt.timestamp()
@@ -244,6 +391,48 @@ def _hhmm(t):
 
 def _day(t):
     return time.strftime('%a %d %b', time.localtime(t)) if t else ''
+
+
+AGENT_GUIDE = """fpga-lab hub -- API for people and agents
+
+Base URL: this host, port 8077 (tailnet only). JSON in and out.
+Auth: header  X-Lab-Token: <your token>   (ask the lab admin: fpga user add NAME)
+Reads need no token.
+
+READ
+  GET  /api/status                 boards: power, lease holder/until, queue, bitstream, health
+  GET  /api/timeline?back=6&ahead=24   per board: past use, current lease, bookings, estimated runs
+  GET  /api/free?board=2&minutes=60[&after=ISO]   earliest start of a free slot
+  GET  /api/bookings               upcoming bookings
+  GET  /api/jobs                   run queue (newest first)
+  GET  /api/whoami                 who your token is
+
+BOOK A SLOT  (during your booking only you can take the board; nobody's lease may run into it)
+  POST   /api/bookings  {"board":"2","start":"2026-10-21T10:00+08:00","minutes":120,"purpose":"..."}
+                        -> 201 booking | 409 overlaps another booking
+  DELETE /api/bookings/<id>        your own bookings only
+
+RUN SOMETHING  (the hub takes the lease, flashes NV if needed, power-cycles, waits,
+                loads, captures UART until the regex or timeout, powers off, releases)
+  POST   /api/jobs   multipart: files bit=<.bit> img=<.bin>;
+                     fields board=any|1|2, until_regex=..., timeout_s=600, purpose=...
+                     -> {"id": N}
+  GET    /api/jobs/<id>/log        your own runs: progress and captured UART
+  POST   /api/jobs/<id>/cancel     your own runs
+
+USE A BOARD INTERACTIVELY  -- talk to the board's console directly (its URL is
+private, ask the admin): POST /api/lease {"holder","purpose","kind":"agent"} ->
+token; send it as X-Lease-Token on every action and as {"lease_token"} in a
+Socket.IO 'lease_bind' after each connect; POST /api/lease/renew every <=5 min
+(409 "yield" = someone is waiting: finish your cycle and DELETE /api/lease).
+Always NV-flash, power-cycle and wait ~35 s before JTAG; volatile flash never
+brings up the debug TAP.
+
+The `fpga` command wraps all of this:  pip install git+https://github.com/project-starch/fpga-lab
+  fpga status | fpga timeline | fpga free 2 --for 2h
+  fpga book 2 --at "2026-10-21 10:00" --for 2h --why "..." | fpga bookings | fpga unbook ID
+  fpga submit --bit X.bit --img Y.bin --until "PASS" | fpga jobs | fpga log ID | fpga cancel ID
+"""
 
 
 PAGE = r"""<!doctype html>
