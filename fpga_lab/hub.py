@@ -488,7 +488,8 @@ svg.tl { display:block; width:100%; min-width:720px; height:auto; font:12px syst
 .legend i { display:inline-block; width:14px; height:10px; border-radius:2px; margin-right:5px; vertical-align:middle; }
 </style></head><body><main>
 <header><h1>FPGA Boards</h1>
-<div class="muted">Updated {{ hhmm(now) }} · refreshes every minute · times are local to the hub</div></header>
+<div class="muted">Updated {{ hhmm(now) }} · refreshes every minute · times are local to the hub ·
+agents: <a href="api">API guide</a></div></header>
 {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
 {% for a in alerts %}<div class="alert">{{ a.message }} <span class="muted">since {{ hhmm(a.opened) }}</span></div>{% endfor %}
 
