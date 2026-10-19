@@ -322,3 +322,43 @@ def test_old_console_without_leases_is_not_unreachable(lab):
     assert [a['key'] for a in lab['db'].open_alerts()] == ['push:1']
 
 
+
+
+# --------------------------------------------------------------- timeline
+
+def test_timeline_past_now_bookings_and_estimates(lab):
+    from fpga_lab import timeline as tlm
+    db, mon, clock = lab['db'], lab['mon'], lab['clock']
+    c1 = lab['consoles']['1']
+    tok = c1.take('Kim', kind='person', minutes=60)['token']
+    for _ in range(20):                      # 20 minutes of Kim on board 1
+        mon.poll()
+        clock.t += 60
+    mon.poll()
+    now = clock()
+    db.add_booking('2', 'Lee', 'demo', now + 1800, now + 5400)
+    lab['db'].qualify('2', lab['bit_sha'])
+    j1 = submit(lab, board='1', timeout=600)   # waits for Kim's lease
+    j2 = submit(lab, board='any', timeout=600) # only qualified on 2, must avoid Lee's booking
+    tl = tlm.build(db, mon.snapshot(), lab['cfg']['boards'], now, 6, 24)
+    r1 = [r for r in tl['rows'] if r['board'] == '1'][0]['segs']
+    past = [s for s in r1 if s['type'] == 'person']
+    assert past and past[0]['label'] == 'Kim' and 19 * 60 <= past[0]['end'] - past[0]['start'] <= 21 * 60
+    assert any(s['type'] == 'person-now' and s['end'] > now for s in r1)
+    b1, s1, e1 = tl['estimates'][j1]
+    assert b1 == '1' and s1 >= c1.lm.holder()['until']           # after Kim's lease
+    b2, s2, e2 = tl['estimates'][j2]
+    assert b2 == '2' and (e2 <= now + 1800 or s2 >= now + 5400)  # not inside the booking
+    svg = tlm.render_svg(tl)
+    assert svg.startswith('<svg') and 'Kim' in svg and 'Lee' in svg and 'now' in svg
+    c1.release(tok)
+
+
+def test_page_shows_timeline_and_escapes_names(lab):
+    app = hub_mod.create_app(lab['cfg'], consoles=lab['consoles'], start_threads=False)
+    now = lab['clock']()
+    lab['db'].add_booking('2', '<script>x</script>', '', now + 600, now + 1200)
+    page = app.test_client().get('/').data.decode()
+    assert '<svg class="tl"' in page and 'Timeline' in page
+    assert '<script>x</script>' not in page and '&lt;script&gt;' in page
+    assert app.test_client().get('/api/timeline').status_code == 200

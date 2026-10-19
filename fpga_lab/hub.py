@@ -20,6 +20,7 @@ from . import config as config_mod
 from .client import Console, ConsoleError, read_url
 from .db import DB
 from .monitor import AlertSink, Monitor
+from . import timeline as timeline_mod
 
 ADMIN_HEADER = 'X-Lab-Admin'
 
@@ -64,10 +65,26 @@ def create_app(cfg=None, consoles=None, start_threads=True):
     def page():
         now = time.time()
         report = db.usage_report(now - 7 * 86400)
-        return render_template_string(PAGE, boards=mon.snapshot(), cfg=cfg, now=now,
+        status = mon.snapshot()
+        back = max(1, min(float(request.args.get('back', 6)), 168))
+        ahead = max(1, min(float(request.args.get('ahead', 24)), 168))
+        tl = timeline_mod.build(db, status, cfg['boards'], now, back, ahead)
+        from markupsafe import Markup
+        return render_template_string(PAGE, boards=status, cfg=cfg, now=now,
                                       bookings=db.bookings(), jobs=db.jobs(20),
                                       alerts=db.open_alerts(), report=report,
+                                      timeline=Markup(timeline_mod.render_svg(tl)),
+                                      est=tl['estimates'], back=back, ahead=ahead,
                                       hhmm=_hhmm, day=_day, msg=request.args.get('msg'))
+
+    @app.route('/api/timeline')
+    def api_timeline():
+        now = time.time()
+        tl = timeline_mod.build(db, mon.snapshot(), cfg['boards'], now,
+                                float(request.args.get('back', 6)), float(request.args.get('ahead', 24)))
+        tl['estimates'] = {str(k): {'board': v[0], 'start': v[1], 'end': v[2]}
+                           for k, v in tl['estimates'].items()}
+        return jsonify(tl)
 
     @app.route('/book', methods=['POST'])
     def book():
@@ -263,6 +280,23 @@ input, select, button { font:inherit; padding:5px 8px; border:1px solid var(--li
 button { background:var(--accent); color:var(--surface); border-color:var(--accent); cursor:pointer; }
 .alert { border-left:3px solid var(--stop); background:var(--warnsoft); padding:8px 12px; border-radius:0 6px 6px 0; }
 .msg { border-left:3px solid var(--accent); background:var(--soft); padding:8px 12px; border-radius:0 6px 6px 0; }
+.tlwrap { overflow-x:auto; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:8px; }
+svg.tl { display:block; width:100%; min-width:720px; height:auto; font:12px system-ui, sans-serif; }
+.tl-grid { stroke:var(--line); stroke-width:1; }
+.tl-tick, .tl-now-text { fill:var(--muted); }
+.tl-row { fill:var(--fg); font-weight:600; }
+.tl-lane { fill:var(--bg); }
+.tl-person, .tl-person-now { fill:var(--warn); }
+.tl-agent, .tl-agent-now { fill:var(--accent); }
+.tl-person { opacity:.55 } .tl-agent { opacity:.55 }
+.tl-book-bg { fill:var(--warnsoft); } .tl-book-line { stroke:var(--warn); stroke-width:2; }
+.tl-booking { stroke:var(--warn); stroke-width:1; }
+.tl-job-est { fill:var(--soft); stroke:var(--accent); stroke-width:1.5; stroke-dasharray:4 3; }
+.tl-seg-text { fill:var(--fg); font-size:11px; pointer-events:none; }
+.tl-person-now + text, .tl-agent-now + text, .tl-person + text, .tl-agent + text { fill:var(--surface); }
+.tl-now { stroke:var(--stop); stroke-width:2; }
+.legend { display:flex; flex-wrap:wrap; gap:14px; font-size:13px; color:var(--muted); margin-top:6px; }
+.legend i { display:inline-block; width:14px; height:10px; border-radius:2px; margin-right:5px; vertical-align:middle; }
 </style></head><body><main>
 <header><h1>FPGA Boards</h1>
 <div class="muted">Updated {{ hhmm(now) }} · refreshes every minute · times are local to the hub</div></header>
@@ -284,6 +318,18 @@ button { background:var(--accent); color:var(--surface); border-color:var(--acce
 </div>{% else %}<div class="muted">No status yet; the first poll runs within a minute.</div>{% endfor %}
 </div></section>
 
+<section><h2>Timeline</h2>
+<div class="tlwrap">{{ timeline }}</div>
+<div class="legend">
+  <span><i style="background:var(--warn)"></i>person</span>
+  <span><i style="background:var(--accent)"></i>agent / run</span>
+  <span><i style="background:repeating-linear-gradient(45deg,var(--warnsoft) 0 3px,var(--warn) 3px 5px)"></i>booking</span>
+  <span><i style="border:1.5px dashed var(--accent);background:var(--soft)"></i>queued run, estimated</span>
+  <span>past {{ back|int }} h · next {{ ahead|int }} h ·
+    <a href="?back=24&ahead=72">3 days</a> · <a href="?back=168&ahead=168">2 weeks</a> · <a href="./">default</a></span>
+</div>
+</section>
+
 <section><h2>Book a board</h2>
 <form class="book" method="post" action="book">
   <label>Board <select name="board">{% for b in cfg.boards %}<option value="{{ b }}">#{{ b }}</option>{% endfor %}</select></label>
@@ -304,9 +350,11 @@ button { background:var(--accent); color:var(--surface); border-color:var(--acce
 </section>
 
 <section><h2>Run queue</h2>
-{% if jobs %}<div class="wrap"><table><tr><th>#</th><th>Owner</th><th>Board</th><th>State</th><th>Note</th></tr>
+{% if jobs %}<div class="wrap"><table><tr><th>#</th><th>Owner</th><th>Board</th><th>State</th><th>Starts</th><th>Note</th></tr>
 {% for j in jobs %}<tr><td>{{ j.id }}</td><td>{{ j.owner }}</td>
-<td>{{ j.board or j.board_req }}</td><td>{{ j.state }}</td><td class="muted">{{ j.reason or '' }}</td></tr>{% endfor %}
+<td>{{ j.board or (est[j.id][0] if j.id in est else j.board_req) }}</td><td>{{ j.state }}</td>
+<td>{% if j.state == 'queued' and j.id in est %}~{{ day(est[j.id][1]) }} {{ hhmm(est[j.id][1]) }}{% elif j.started %}{{ hhmm(j.started) }}{% endif %}</td>
+<td class="muted">{{ j.reason or '' }}</td></tr>{% endfor %}
 </table></div>{% else %}<p class="muted">No runs yet. Runs are submitted with <code>fpga submit</code> on the hub host.</p>{% endif %}
 </section>
 
