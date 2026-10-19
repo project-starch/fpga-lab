@@ -135,8 +135,6 @@ class Monitor:
             return
         now = self.clock()
         for b, c in self.consoles.items():
-            if (self.status.get(b) or {}).get('enforce') == 'absent':
-                continue                      # console has no lease code yet
             items = [{'id': str(x['id']), 'holder': x['holder'], 'purpose': x['purpose'],
                       'start': x['start'], 'end': x['end']}
                      for x in self.db.bookings(b, since=now) if x['start'] < now + PUSH_WINDOW_S]
@@ -144,7 +142,16 @@ class Monitor:
                 c.set_reservations(self.hub_token, items)
                 self._clear(f'push:{b}', f'Board {b} accepts bookings again')
             except ConsoleError as e:
-                self._alert(f'push:{b}', b, f'Board {b} refused the booking list: {e.message}')
+                # A console without lease code (404) or without the hub token
+                # (403) cannot hold bookings. That only matters once someone
+                # has booked that board; until then it is not worth an alert.
+                if items or e.status not in (403, 404):
+                    why = {404: 'its console has no lease code yet',
+                           403: 'its console does not have the hub token (LEASE_HUB_TOKEN)'}
+                    self._alert(f'push:{b}', b, f'Board {b} cannot enforce bookings: '
+                                + why.get(e.status, e.message))
+                else:
+                    self._clear(f'push:{b}', f'Board {b}: no bookings to enforce')
 
     # ------------------------------------------------------------- dispatch
 

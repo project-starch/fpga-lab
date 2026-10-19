@@ -280,8 +280,15 @@ def test_old_console_without_leases_is_not_unreachable(lab):
     jid = submit(lab, board='1')
     assert lab['mon'].dispatch(run_async=False) == []
     assert 'no leases yet' in lab['db'].job(jid)['reason']
-    lab['mon'].push_bookings()              # skipped for that board, no alert
+    lab['mon'].push_bookings()              # no bookings: no alert
     assert lab['db'].open_alerts() == []
+    c.set_reservations = lambda *a: (_ for _ in ()).throw(ConsoleError(404, 'http_error', 'HTTP 404'))
+    lab['mon'].push_bookings()
+    assert lab['db'].open_alerts() == []
+    now = lab['clock']()
+    lab['db'].add_booking('1', 'Kim', '', now + 600, now + 1200)
+    lab['mon'].push_bookings()              # a booking it cannot enforce: alert
+    assert [a['key'] for a in lab['db'].open_alerts()] == ['push:1']
 
 
 def test_hub_own_tailscale_address_counts_as_local(lab):

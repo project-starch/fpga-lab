@@ -253,7 +253,7 @@ button { background:var(--accent); color:var(--surface); border-color:var(--acce
   {% else %}<span><span class="chip">free</span></span>{% endif %}
   {% if s.reachable %}
   <span class="muted">power {{ s.power }} · bitstream {{ s.nv_bitstream or 'unknown' }}</span>
-  <span class="muted">{{ s.queue|length }} waiting · health {{ s.health }} · leases {{ s.enforce }}</span>
+  <span class="muted">{{ s.queue|length }} waiting · health {{ s.health or 'n/a' }} · leases {{ {'absent': 'not installed', 'log': 'recorded, not enforced', 'on': 'enforced', 'off': 'off'}.get(s.enforce, s.enforce) }}</span>
   {% endif %}
 </div>{% else %}<div class="muted">No status yet; the first poll runs within a minute.</div>{% endfor %}
 </div></section>
