@@ -12,6 +12,8 @@ Rendered as an inline SVG so the page needs no script or library.
 import html
 import time
 
+from .owners import colour, owner_of
+
 FLASH_LOAD_ALLOWANCE_S = 240      # NV flash ~95 s + image load; generous on purpose
 
 
@@ -28,10 +30,11 @@ def _merge_minutes(rows):
 
 
 def past_segments(db, board, t0, t1):
-    rows = db.q("""SELECT minute, holder, kind FROM usage
+    rows = db.q("""SELECT minute, holder, kind, owner FROM usage
                    WHERE board=? AND minute>=? AND minute<? AND holder IS NOT NULL
                    ORDER BY minute""", board, int(t0 // 60), int(t1 // 60) + 1)
-    return _merge_minutes([(r['minute'], r['holder'], r['kind']) for r in rows])
+    segs = _merge_minutes([(r['minute'], r['holder'], (r['kind'], r['owner'])) for r in rows])
+    return [(s, e, h, k[0], k[1]) for s, e, h, k in segs]
 
 
 def estimate_jobs(db, status, boards_cfg, now):
@@ -75,33 +78,46 @@ def estimate_jobs(db, status, boards_cfg, now):
     return placed
 
 
-def build(db, status, boards_cfg, now, back_h=6, ahead_h=24):
+def build(db, status, boards_cfg, now, back_h=6, ahead_h=24, cfg=None):
+    cfg = cfg or {}
     t0, t1 = now - back_h * 3600, now + ahead_h * 3600
     est = estimate_jobs(db, status, boards_cfg, now)
     queued = {j['id']: j for j in db.next_queued()}
     rows = []
     for b in boards_cfg:
         segs = []
-        for s, e, holder, kind in past_segments(db, b, t0, now):
-            segs.append({'start': s, 'end': min(e, now), 'label': holder, 'type': kind or 'agent'})
+        for s, e, holder, kind, owner in past_segments(db, b, t0, now):
+            owner = owner or ('(unknown)' if kind == 'unknown' else holder)
+            segs.append({'start': s, 'end': min(e, now), 'label': holder, 'owner': owner,
+                         'type': 'used'})
         L = (status.get(b) or {}).get('lease')
         if L:
             # The usage table covers up to the last poll; draw the rest of the
             # current lease from now to its end.
             segs.append({'start': now, 'end': L['until'], 'label': L['holder'],
-                         'type': (L.get('kind') or 'agent') + '-now'})
+                         'owner': owner_of(L, cfg), 'type': 'now'})
         for x in db.bookings(b, since=t0):
             segs.append({'start': x['start'], 'end': x['end'], 'label': x['holder'],
-                         'type': 'booking', 'title': x.get('purpose') or ''})
+                         'owner': x['holder'], 'type': 'booking', 'title': x.get('purpose') or ''})
         for jid, (jb, s, e) in est.items():
             if jb == b:
                 segs.append({'start': s, 'end': e, 'label': f"#{jid} {queued[jid]['owner']}",
-                             'type': 'job-est'})
+                             'owner': queued[jid]['owner'], 'type': 'job-est'})
         rows.append({'board': b, 'segs': segs})
     return {'t0': t0, 't1': t1, 'now': now, 'rows': rows, 'estimates': est}
 
 
-def render_svg(tl, width=960, row_h=34, label_w=78):
+def owners_in(tl):
+    seen = []
+    for row in tl['rows']:
+        for s in row['segs']:
+            o = s.get('owner')
+            if o and o not in seen and s['end'] > tl['t0'] and s['start'] < tl['t1']:
+                seen.append(o)
+    return seen
+
+
+def render_svg(tl, width=960, row_h=34, label_w=78, cfg=None, db=None):
     t0, t1, now = tl['t0'], tl['t1'], tl['now']
     plot_w = width - label_w - 10
     top = 26
@@ -137,18 +153,30 @@ def render_svg(tl, width=960, row_h=34, label_w=78):
             x0, x1 = x(s['start']), x(s['end'])
             w = max(x1 - x0, 2)
             cls = 'tl-' + s['type'].replace('_', '-')
-            tip = (f"{s['label']}: {time.strftime('%a %H:%M', time.localtime(s['start']))}"
+            col = colour(s.get('owner'), cfg, db)
+            who = s.get('owner')
+            tip = ((f"{who} · " if who and who != s['label'] else '') +
+                   f"{s['label']}: {time.strftime('%a %H:%M', time.localtime(s['start']))}"
                    f"–{time.strftime('%H:%M', time.localtime(s['end']))}")
             if s['type'] == 'job-est':
                 tip += ' (estimated)'
             if s.get('title'):
                 tip += f" · {s['title']}"
-            fill = ' fill="url(#hatch)"' if s['type'] == 'booking' else ''
+            if s['type'] == 'booking':
+                style = f'fill:{col};fill-opacity:.18;stroke:{col};stroke-width:1.5'
+            elif s['type'] == 'job-est':
+                style = f'fill:{col};fill-opacity:.12;stroke:{col};stroke-width:1.5;stroke-dasharray:4 3'
+            elif s['type'] == 'used':
+                style = f'fill:{col};fill-opacity:.6'
+            else:
+                style = f'fill:{col}'
             out.append(f'<g><title>{html.escape(tip)}</title>'
-                       f'<rect x="{x0:.1f}" y="{y + 6}" width="{w:.1f}" height="{row_h - 12}" rx="3" class="{cls}"{fill}/>')
+                       f'<rect x="{x0:.1f}" y="{y + 6}" width="{w:.1f}" height="{row_h - 12}" rx="3" class="{cls}" style="{style}"/>')
             if w > 46:
-                lab = s['label'] if len(s['label']) * 7 < w - 8 else s['label'][:max(1, int((w - 8) / 7) - 1)] + '…'
-                out.append(f'<text x="{x0 + 5:.1f}" y="{y + row_h / 2 + 4:.1f}" class="tl-seg-text">{html.escape(lab)}</text>')
+                text = s.get('owner') or s['label']
+                lab = text if len(text) * 7 < w - 8 else text[:max(1, int((w - 8) / 7) - 1)] + '…'
+                tcls = 'tl-seg-text' + (' on-fill' if s['type'] in ('used', 'now') else '')
+                out.append(f'<text x="{x0 + 5:.1f}" y="{y + row_h / 2 + 4:.1f}" class="{tcls}">{html.escape(lab)}</text>')
             out.append('</g>')
     xn = x(now)
     out.append(f'<line x1="{xn:.1f}" y1="{top - 4}" x2="{xn:.1f}" y2="{height - 4}" class="tl-now"/>')

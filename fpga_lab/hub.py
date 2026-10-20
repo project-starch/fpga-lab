@@ -20,6 +20,7 @@ from . import config as config_mod
 from .client import Console, ConsoleError, read_url
 from .db import DB
 from .monitor import AlertSink, Monitor
+from . import owners as owners_mod
 from . import timeline as timeline_mod
 
 ADMIN_HEADER = 'X-Lab-Admin'
@@ -90,12 +91,14 @@ def create_app(cfg=None, consoles=None, start_threads=True):
         status = mon.snapshot()
         back = max(1, min(float(request.args.get('back', 6)), 168))
         ahead = max(1, min(float(request.args.get('ahead', 24)), 168))
-        tl = timeline_mod.build(db, status, cfg['boards'], now, back, ahead)
+        tl = timeline_mod.build(db, status, cfg['boards'], now, back, ahead, cfg)
+        legend = [(o, owners_mod.colour(o, cfg, db)) for o in timeline_mod.owners_in(tl)]
         from markupsafe import Markup
         return render_template_string(PAGE, boards=status, cfg=cfg, now=now,
                                       bookings=db.bookings(), jobs=db.jobs(20),
                                       alerts=db.open_alerts(), report=report,
-                                      timeline=Markup(timeline_mod.render_svg(tl)),
+                                      timeline=Markup(timeline_mod.render_svg(tl, cfg=cfg, db=db)),
+                                      legend=legend,
                                       est=tl['estimates'], back=back, ahead=ahead,
                                       hhmm=_hhmm, day=_day, msg=request.args.get('msg'))
 
@@ -103,7 +106,7 @@ def create_app(cfg=None, consoles=None, start_threads=True):
     def api_timeline():
         now = time.time()
         tl = timeline_mod.build(db, mon.snapshot(), cfg['boards'], now,
-                                float(request.args.get('back', 6)), float(request.args.get('ahead', 24)))
+                                float(request.args.get('back', 6)), float(request.args.get('ahead', 24)), cfg)
         tl['estimates'] = {str(k): {'board': v[0], 'start': v[1], 'end': v[2]}
                            for k, v in tl['estimates'].items()}
         return jsonify(tl)
@@ -475,14 +478,9 @@ svg.tl { display:block; width:100%; min-width:720px; height:auto; font:12px syst
 .tl-tick, .tl-now-text { fill:var(--muted); }
 .tl-row { fill:var(--fg); font-weight:600; }
 .tl-lane { fill:var(--bg); }
-.tl-person, .tl-person-now { fill:var(--warn); }
-.tl-agent, .tl-agent-now { fill:var(--accent); }
-.tl-person { opacity:.55 } .tl-agent { opacity:.55 }
 .tl-book-bg { fill:var(--warnsoft); } .tl-book-line { stroke:var(--warn); stroke-width:2; }
-.tl-booking { stroke:var(--warn); stroke-width:1; }
-.tl-job-est { fill:var(--soft); stroke:var(--accent); stroke-width:1.5; stroke-dasharray:4 3; }
 .tl-seg-text { fill:var(--fg); font-size:11px; pointer-events:none; }
-.tl-person-now + text, .tl-agent-now + text, .tl-person + text, .tl-agent + text { fill:var(--surface); }
+.tl-seg-text.on-fill { fill:#fff; }
 .tl-now { stroke:var(--stop); stroke-width:2; }
 .legend { display:flex; flex-wrap:wrap; gap:14px; font-size:13px; color:var(--muted); margin-top:6px; }
 .legend i { display:inline-block; width:14px; height:10px; border-radius:2px; margin-right:5px; vertical-align:middle; }
@@ -500,6 +498,7 @@ agents: <a href="api">API guide</a></div></header>
   {% elif s.lease %}<span><span class="chip held">held by {{ s.lease.holder }} until {{ hhmm(s.lease.until) }}</span></span>
     {% if s.lease.purpose %}<span class="muted">{{ s.lease.purpose }}</span>{% endif %}
   {% elif s.offer %}<span><span class="chip held">offered to {{ s.offer.holder }}</span></span>
+  {% elif s.enforce == 'absent' and s.power == 'on' %}<span><span class="chip held">in use · holder unknown (no leases on this console)</span></span>
   {% else %}<span><span class="chip">free</span></span>{% endif %}
   {% if s.reachable %}
   <span class="muted">power {{ s.power }} · bitstream {{ s.nv_bitstream or 'unknown' }}</span>
@@ -511,10 +510,8 @@ agents: <a href="api">API guide</a></div></header>
 <section><h2>Timeline</h2>
 <div class="tlwrap">{{ timeline }}</div>
 <div class="legend">
-  <span><i style="background:var(--warn)"></i>person</span>
-  <span><i style="background:var(--accent)"></i>agent / run</span>
-  <span><i style="background:repeating-linear-gradient(45deg,var(--warnsoft) 0 3px,var(--warn) 3px 5px)"></i>booking</span>
-  <span><i style="border:1.5px dashed var(--accent);background:var(--soft)"></i>queued run, estimated</span>
+  {% for o, c in legend %}<span><i style="background:{{ c }}"></i>{{ o }}</span>{% endfor %}
+  <span>solid: in use · light: booked · dashed: queued run, estimated</span>
   <span>past {{ back|int }} h · next {{ ahead|int }} h ·
     <a href="?back=24&ahead=72">3 days</a> · <a href="?back=168&ahead=168">2 weeks</a> · <a href="./">default</a></span>
 </div>
@@ -550,7 +547,7 @@ agents: <a href="api">API guide</a></div></header>
 
 <section><h2>Use in the last 7 days</h2>
 {% if report %}<div class="wrap"><table><tr><th>Board</th><th>Who</th><th>Kind</th><th>Hours</th></tr>
-{% for r in report %}<tr><td>#{{ r.board }}</td><td>{{ r.holder }}</td><td>{{ r.kind }}</td><td>{{ '%.1f'|format(r.minutes / 60) }}</td></tr>{% endfor %}
+{% for r in report %}<tr><td>#{{ r.board }}</td><td>{{ r.owner }}{% if r.owner != r.holder %} <span class="muted">({{ r.holder }})</span>{% endif %}</td><td>{{ r.kind }}</td><td>{{ '%.1f'|format(r.minutes / 60) }}</td></tr>{% endfor %}
 </table></div>{% else %}<p class="muted">Nothing recorded yet.</p>{% endif %}
 </section>
 </main></body></html>

@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE TABLE IF NOT EXISTS users (
   name TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, created REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS owner_colours (
+  name TEXT PRIMARY KEY, idx INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, board TEXT,
   message TEXT NOT NULL, opened REAL NOT NULL, closed REAL
@@ -49,6 +52,9 @@ class DB:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
         with self.conn() as c:
             c.executescript(SCHEMA)
+            cols = [r[1] for r in c.execute('PRAGMA table_info(usage)')]
+            if 'owner' not in cols:                 # added after the first release
+                c.execute('ALTER TABLE usage ADD COLUMN owner TEXT')
 
     def conn(self):
         c = sqlite3.connect(self.path, timeout=30)
@@ -125,13 +131,16 @@ class DB:
 
     # -------------------------------------------------------------- usage
 
-    def record_usage(self, board, minute, holder, kind):
-        self.x('INSERT OR REPLACE INTO usage VALUES (?,?,?,?)', board, minute, holder, kind)
+    def record_usage(self, board, minute, holder, kind, owner=None):
+        self.x('INSERT OR REPLACE INTO usage (board, minute, holder, kind, owner) VALUES (?,?,?,?,?)',
+               board, minute, holder, kind, owner)
 
     def usage_report(self, since):
-        return self.q("""SELECT board, holder, kind, COUNT(*) AS minutes FROM usage
+        return self.q("""SELECT board, COALESCE(owner, holder) AS owner, holder, kind,
+                                COUNT(*) AS minutes FROM usage
                          WHERE minute >= ? AND holder IS NOT NULL
-                         GROUP BY board, holder, kind ORDER BY board, minutes DESC""",
+                         GROUP BY board, COALESCE(owner, holder), holder, kind
+                         ORDER BY board, minutes DESC""",
                       int(since // 60))
 
     # -------------------------------------------------------------- users
@@ -148,6 +157,19 @@ class DB:
 
     def remove_user(self, name):
         self.x('DELETE FROM users WHERE name=?', name)
+
+    # ------------------------------------------------------- owner colours
+
+    def colour_index(self, name):
+        """Stable per-person index, handed out in order of first sight, so
+        the first dozen people never share a colour (a hash would)."""
+        with self.conn() as c:
+            r = c.execute('SELECT idx FROM owner_colours WHERE name=?', (name,)).fetchone()
+            if r:
+                return r[0]
+            n = c.execute('SELECT COUNT(*) FROM owner_colours').fetchone()[0]
+            c.execute('INSERT OR IGNORE INTO owner_colours VALUES (?,?)', (name, n))
+            return c.execute('SELECT idx FROM owner_colours WHERE name=?', (name,)).fetchone()[0]
 
     # ------------------------------------------------------------- alerts
 

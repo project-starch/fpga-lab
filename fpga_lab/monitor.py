@@ -12,6 +12,7 @@ import time
 import requests
 
 from .client import ConsoleError
+from .owners import owner_of
 from .runner import Runner
 
 UNREACHABLE_AFTER = 5          # consecutive failed polls (1/min) before alerting
@@ -108,8 +109,16 @@ class Monitor:
                         build=state.get('server_build'))
             with self.lock:
                 self.status[b] = snap
-            self.db.record_usage(b, int(now // 60), L['holder'] if L else None,
-                                 L['kind'] if L else None)
+            if L:
+                self.db.record_usage(b, int(now // 60), L['holder'], L['kind'],
+                                     owner_of(L, self.cfg))
+            elif lease.get('enforce') == 'absent' and state.get('power') == 'on':
+                # A console without lease code: the board is in use, by whom is
+                # unknown. Draw it as such rather than as free.
+                self.db.record_usage(b, int(now // 60), '(holder unknown: no leases)',
+                                     'unknown', None)
+            else:
+                self.db.record_usage(b, int(now // 60), None, None)
 
             verdict, age = health.get('verdict'), health.get('age_s')
             if verdict not in ('ok', None) or (age is not None and age > STALE_HEALTH_S):

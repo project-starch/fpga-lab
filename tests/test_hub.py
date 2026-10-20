@@ -342,9 +342,9 @@ def test_timeline_past_now_bookings_and_estimates(lab):
     j2 = submit(lab, board='any', timeout=600) # only qualified on 2, must avoid Lee's booking
     tl = tlm.build(db, mon.snapshot(), lab['cfg']['boards'], now, 6, 24)
     r1 = [r for r in tl['rows'] if r['board'] == '1'][0]['segs']
-    past = [s for s in r1 if s['type'] == 'person']
+    past = [s for s in r1 if s['type'] == 'used']
     assert past and past[0]['label'] == 'Kim' and 19 * 60 <= past[0]['end'] - past[0]['start'] <= 21 * 60
-    assert any(s['type'] == 'person-now' and s['end'] > now for s in r1)
+    assert any(s['type'] == 'now' and s['end'] > now for s in r1)
     b1, s1, e1 = tl['estimates'][j1]
     assert b1 == '1' and s1 >= c1.lm.holder()['until']           # after Kim's lease
     b2, s2, e2 = tl['estimates'][j2]
@@ -408,3 +408,70 @@ def test_user_tokens_bookings_and_own_jobs(lab):
     # tokens stored hashed
     assert tok not in str(lab['db'].q('SELECT * FROM users'))
     assert 'X-Lab-Token' in http.get('/llms.txt').data.decode()
+
+
+
+def test_owner_resolution_and_colours():
+    from fpga_lab.owners import owner_of, colour, UNKNOWN
+    cfg = {'holder_owner': {'board-lane': 'Alexey'}, 'people': {'kim@x.org': 'Kim'}}
+    assert owner_of({'holder': 'board-lane'}, cfg) == 'Alexey'
+    assert owner_of({'holder': 'job12:diego'}, cfg) == 'diego'
+    assert owner_of({'holder': 'anything', 'who': 'kim@x.org'}, cfg) == 'Kim'
+    assert owner_of({'holder': 'anything', 'who': 'lee@y.org'}, cfg) == 'lee'
+    assert owner_of({'holder': 'Sam'}, cfg) == 'Sam'
+    assert colour('Alexey') == colour('Alexey') and colour('Alexey') != UNKNOWN
+    assert colour('(unknown)') == UNKNOWN
+    assert colour('Alexey', {'colours': {'Alexey': '#123456'}}) == '#123456'
+
+
+def test_first_dozen_people_get_distinct_stable_colours(tmp_path):
+    from fpga_lab.db import DB
+    from fpga_lab.owners import colour
+    db = DB(str(tmp_path / 'c.sqlite'))
+    names = [f'user{i}' for i in range(12)]
+    cols = [colour(n, None, db) for n in names]
+    assert len(set(cols)) == 12
+    assert [colour(n, None, db) for n in names] == cols          # stable
+
+
+def test_board_without_leases_but_powered_is_shown_in_use(lab):
+    from fpga_lab.client import ConsoleError
+    from fpga_lab import timeline as tlm
+    c = lab['consoles']['1']
+
+    def nf():
+        raise ConsoleError(404, 'http_error', 'HTTP 404')
+    c.lease = nf
+    c.power_on = True
+    for _ in range(10):
+        lab['mon'].poll()
+        lab['clock'].t += 60
+    c.power_on = False                       # quiet control: off is not "in use"
+    for _ in range(5):
+        lab['mon'].poll()
+        lab['clock'].t += 60
+    tl = tlm.build(lab['db'], lab['mon'].snapshot(), lab['cfg']['boards'], lab['clock'](), 6, 24)
+    segs = [s for s in tl['rows'][0]['segs'] if s['type'] == 'used']
+    assert len(segs) == 1 and segs[0]['owner'] == '(unknown)'
+    assert 9 * 60 <= segs[0]['end'] - segs[0]['start'] <= 11 * 60
+    assert 'holder unknown' in tlm.render_svg(tl)
+    c.power_on = True
+    lab['mon'].poll()
+    app = hub_mod.create_app(lab['cfg'], consoles=lab['consoles'], start_threads=False)
+    app.config['monitor'].poll()
+    assert 'in use · holder unknown' in app.test_client().get('/').data.decode()
+
+
+def test_timeline_colours_by_owner_and_legend(lab):
+    cfg = dict(lab['cfg'], holder_owner={'board-lane': 'Alexey'})
+    app = hub_mod.create_app(cfg, consoles=lab['consoles'], start_threads=False)
+    mon = app.config['monitor']
+    lab['consoles']['1'].take('board-lane', kind='agent')
+    lab['consoles']['2'].take('job3:diego', kind='agent')
+    mon.poll()
+    page = app.test_client().get('/').data.decode()
+    from fpga_lab.owners import colour
+    db = app.config['db']
+    assert colour('Alexey', cfg, db) in page and colour('diego', cfg, db) in page
+    assert colour('Alexey', cfg, db) != colour('diego', cfg, db)
+    assert '>Alexey</span>' in page and '>diego</span>' in page      # legend entries

@@ -12,7 +12,10 @@
       "hub_token_file": "~/.config/fpga-lab/hub-token",     (shared with the consoles)
       "admin_token_file": "~/.config/fpga-lab/admin-token", (submit/cancel/log/qualify)
       "data_dir": "~/.local/share/fpga-lab",
-      "webhook_file": null
+      "webhook_file": null,
+      "holder_owner": {"board-lane": "Alexey"},          (whose agent a lease label is)
+      "people": {"alexeyspb9@gmail.com": "Alexey"},       (Tailscale login -> name)
+      "colours": {"Alexey": "#2f7ed8"}                   (optional fixed colours)
     }
 
 hub_listen: bind to the host's Tailscale address, not 0.0.0.0, so the page
