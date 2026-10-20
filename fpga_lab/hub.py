@@ -502,6 +502,7 @@ agents: <a href="api">API guide</a></div></header>
   {% else %}<span><span class="chip">free</span></span>{% endif %}
   {% if s.reachable %}
   <span class="muted">power {{ s.power }} · bitstream {{ s.nv_bitstream or 'unknown' }}</span>
+  {% if s.bookings_note %}<span class="muted">{{ s.bookings_note }}</span>{% endif %}
   <span class="muted">{{ s.queue|length }} waiting · health {{ s.health or 'n/a' }} · leases {{ {'absent': 'not installed', 'log': 'recorded, not enforced', 'on': 'enforced', 'off': 'off'}.get(s.enforce, s.enforce) }}</span>
   {% endif %}
 </div>{% else %}<div class="muted">No status yet; the first poll runs within a minute.</div>{% endfor %}

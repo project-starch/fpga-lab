@@ -108,6 +108,7 @@ class Monitor:
                         health=health.get('verdict'), health_age=health.get('age_s'),
                         build=state.get('server_build'))
             with self.lock:
+                snap['bookings_note'] = (self.status.get(b) or {}).get('bookings_note')
                 self.status[b] = snap
             if L:
                 self.db.record_usage(b, int(now // 60), L['holder'], L['kind'],
@@ -147,20 +148,23 @@ class Monitor:
             items = [{'id': str(x['id']), 'holder': x['holder'], 'purpose': x['purpose'],
                       'start': x['start'], 'end': x['end']}
                      for x in self.db.bookings(b, since=now) if x['start'] < now + PUSH_WINDOW_S]
+            note = None
             try:
                 c.set_reservations(self.hub_token, items)
                 self._clear(f'push:{b}', f'Board {b} accepts bookings again')
             except ConsoleError as e:
                 # A console without lease code (404) or without the hub token
-                # (403) cannot hold bookings. That only matters once someone
-                # has booked that board; until then it is not worth an alert.
-                if items or e.status not in (403, 404):
-                    why = {404: 'its console has no lease code yet',
-                           403: 'its console does not have the hub token (LEASE_HUB_TOKEN)'}
-                    self._alert(f'push:{b}', b, f'Board {b} cannot enforce bookings: '
-                                + why.get(e.status, e.message))
+                # (403) is a known setup state, not a fault: show it on the
+                # board, and alert only on anything else.
+                known = {404: 'bookings shown, not enforced: no lease code on this console yet',
+                         403: 'bookings shown, not enforced: console lacks the hub token'}
+                if e.status in known:
+                    note = known[e.status]
+                    self._clear(f'push:{b}', f'Board {b}: booking push state is known')
                 else:
-                    self._clear(f'push:{b}', f'Board {b}: no bookings to enforce')
+                    self._alert(f'push:{b}', b, f'Board {b} refused the booking list: {e.message}')
+            with self.lock:
+                self.status.setdefault(b, {})['bookings_note'] = note
 
     # ------------------------------------------------------------- dispatch
 

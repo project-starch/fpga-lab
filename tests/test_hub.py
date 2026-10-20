@@ -318,7 +318,11 @@ def test_old_console_without_leases_is_not_unreachable(lab):
     assert lab['db'].open_alerts() == []
     now = lab['clock']()
     lab['db'].add_booking('1', 'Kim', '', now + 600, now + 1200)
-    lab['mon'].push_bookings()              # a booking it cannot enforce: alert
+    lab['mon'].push_bookings()              # a booking it cannot enforce: a note, not an alert
+    assert lab['db'].open_alerts() == []
+    assert 'not enforced' in lab['mon'].snapshot()['1']['bookings_note']
+    c.set_reservations = lambda *a: (_ for _ in ()).throw(ConsoleError(500, 'http_error', 'boom'))
+    lab['mon'].push_bookings()              # an unexpected refusal still alerts
     assert [a['key'] for a in lab['db'].open_alerts()] == ['push:1']
 
 
@@ -475,3 +479,22 @@ def test_timeline_colours_by_owner_and_legend(lab):
     assert colour('Alexey', cfg, db) in page and colour('diego', cfg, db) in page
     assert colour('Alexey', cfg, db) != colour('diego', cfg, db)
     assert '>Alexey</span>' in page and '>diego</span>' in page      # legend entries
+
+
+
+def test_one_person_one_colour_across_lease_booking_job_and_history(lab):
+    from fpga_lab import timeline as tlm
+    cfg = dict(lab['cfg'], holder_owner={'board-lane': 'Alexey'})
+    mon = lab['mon']
+    mon.cfg = cfg
+    c = lab['consoles']['2']
+    tok = c.take('board-lane', kind='agent')['token']
+    for _ in range(3):
+        mon.poll()
+        lab['clock'].t += 60
+    now = lab['clock']()
+    lab['db'].add_booking('2', 'board-lane', 'x', now + 600, now + 1200)
+    tl = tlm.build(lab['db'], mon.snapshot(), cfg['boards'], now, 6, 24, cfg)
+    owners = {s['owner'] for s in tl['rows'][1]['segs']}
+    assert owners == {'Alexey'}
+    c.release(tok)

@@ -12,7 +12,7 @@ Rendered as an inline SVG so the page needs no script or library.
 import html
 import time
 
-from .owners import colour, owner_of
+from .owners import colour, owner_of, person
 
 FLASH_LOAD_ALLOWANCE_S = 240      # NV flash ~95 s + image load; generous on purpose
 
@@ -87,7 +87,7 @@ def build(db, status, boards_cfg, now, back_h=6, ahead_h=24, cfg=None):
     for b in boards_cfg:
         segs = []
         for s, e, holder, kind, owner in past_segments(db, b, t0, now):
-            owner = owner or ('(unknown)' if kind == 'unknown' else holder)
+            owner = '(unknown)' if kind == 'unknown' else person(owner or holder, cfg)
             segs.append({'start': s, 'end': min(e, now), 'label': holder, 'owner': owner,
                          'type': 'used'})
         L = (status.get(b) or {}).get('lease')
@@ -98,11 +98,12 @@ def build(db, status, boards_cfg, now, back_h=6, ahead_h=24, cfg=None):
                          'owner': owner_of(L, cfg), 'type': 'now'})
         for x in db.bookings(b, since=t0):
             segs.append({'start': x['start'], 'end': x['end'], 'label': x['holder'],
-                         'owner': x['holder'], 'type': 'booking', 'title': x.get('purpose') or ''})
+                         'owner': person(x['holder'], cfg), 'type': 'booking',
+                         'title': x.get('purpose') or ''})
         for jid, (jb, s, e) in est.items():
             if jb == b:
                 segs.append({'start': s, 'end': e, 'label': f"#{jid} {queued[jid]['owner']}",
-                             'owner': queued[jid]['owner'], 'type': 'job-est'})
+                             'owner': person(queued[jid]['owner'], cfg), 'type': 'job-est'})
         rows.append({'board': b, 'segs': segs})
     return {'t0': t0, 't1': t1, 'now': now, 'rows': rows, 'estimates': est}
 

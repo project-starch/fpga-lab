@@ -20,18 +20,25 @@ UNKNOWN = '#9aa3a0'
 _JOB = re.compile(r'^job\d+:(.+)$')
 
 
+def person(label, cfg):
+    """The person behind a label: a lease holder, a booking holder, a job
+    owner. Applied the same way everywhere, so one person is one colour."""
+    if not label or label.startswith('('):
+        return label
+    m = _JOB.match(label)
+    if m:
+        label = m.group(1)
+    return ((cfg or {}).get('holder_owner') or {}).get(label, label)
+
+
 def owner_of(lease, cfg):
     if not lease:
         return None
-    people = cfg.get('people') or {}
+    people = (cfg or {}).get('people') or {}
     who = lease.get('who')
     if who:
         return people.get(who, who.split('@')[0])
-    holder = lease.get('holder') or ''
-    m = _JOB.match(holder)
-    if m:
-        return m.group(1)
-    return (cfg.get('holder_owner') or {}).get(holder, holder)
+    return person(lease.get('holder') or '', cfg)
 
 
 def colour(owner, cfg=None, db=None):
